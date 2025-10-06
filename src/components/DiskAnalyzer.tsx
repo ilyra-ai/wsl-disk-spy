@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { HardDrive, Upload, FolderOpen } from "lucide-react";
+import { HardDrive, Upload, FolderOpen, RefreshCw, Terminal } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 import DiskChart from "./DiskChart";
 import FolderTable from "./FolderTable";
 
@@ -16,6 +17,64 @@ export interface FolderData {
 const DiskAnalyzer = () => {
   const [folders, setFolders] = useState<FolderData[]>([]);
   const [inputData, setInputData] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+
+  // Load latest analysis on mount
+  useEffect(() => {
+    loadLatestAnalysis();
+
+    // Set up real-time subscription
+    const channel = supabase
+      .channel('disk-analyses-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'disk_analyses'
+        },
+        () => {
+          loadLatestAnalysis();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const loadLatestAnalysis = async () => {
+    try {
+      setIsLoading(true);
+      const { data, error } = await supabase
+        .from('disk_analyses')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data) {
+        const analysisData = data.data as { folders: { size: string; path: string }[], timestamp?: string };
+        const parsed = analysisData.folders.map((f) => ({
+          path: f.path,
+          size: convertToBytes(f.size),
+          sizeFormatted: f.size,
+        })).sort((a, b) => b.size - a.size);
+
+        setFolders(parsed);
+        setLastUpdate(new Date(data.created_at));
+        toast.success(`Análise carregada: ${parsed.length} pastas`);
+      }
+    } catch (error) {
+      console.error('Error loading analysis:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const parseInput = (data: string) => {
     const lines = data.trim().split("\n");
@@ -97,30 +156,95 @@ const DiskAnalyzer = () => {
           <p className="text-muted-foreground text-lg">
             Visualize o uso de espaço do seu sistema
           </p>
+          {lastUpdate && (
+            <p className="text-sm text-muted-foreground">
+              Última atualização: {lastUpdate.toLocaleString('pt-BR')}
+            </p>
+          )}
         </div>
 
         {/* Instructions Card */}
         <Card className="p-6 bg-card border-border">
           <div className="flex items-start gap-4">
-            <FolderOpen className="w-6 h-6 text-accent mt-1 flex-shrink-0" />
-            <div className="space-y-2">
-              <h3 className="font-semibold text-foreground">Como usar:</h3>
-              <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
+            <Terminal className="w-6 h-6 text-accent mt-1 flex-shrink-0" />
+            <div className="space-y-3">
+              <h3 className="font-semibold text-foreground">Método Automático (Recomendado):</h3>
+              <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
                 <li>
-                  Execute no terminal WSL2:{" "}
-                  <code className="px-2 py-1 bg-muted rounded text-accent">
-                    sudo du -sh /* 2&gt;/dev/null
+                  Salve este script no WSL2:{" "}
+                  <code className="px-2 py-1 bg-muted rounded text-accent text-xs">
+                    nano ~/analyze-disk.sh
                   </code>
                 </li>
-                <li>Copie a saída do comando</li>
-                <li>Cole no campo abaixo e clique em "Analisar"</li>
+                <li className="mt-2">
+                  Cole o conteúdo (disponível abaixo) e salve (Ctrl+O, Enter, Ctrl+X)
+                </li>
+                <li>
+                  Torne executável:{" "}
+                  <code className="px-2 py-1 bg-muted rounded text-accent text-xs">
+                    chmod +x ~/analyze-disk.sh
+                  </code>
+                </li>
+                <li>
+                  Execute:{" "}
+                  <code className="px-2 py-1 bg-muted rounded text-accent text-xs">
+                    ~/analyze-disk.sh
+                  </code>
+                </li>
               </ol>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-accent font-medium">
+                  Ver código do script
+                </summary>
+                <pre className="mt-2 p-3 bg-background rounded text-xs overflow-x-auto">
+{`#!/bin/bash
+API_URL="https://hlkwvwydellekqdtpvzo.supabase.co/functions/v1/analyze-disk"
+
+echo "🔍 Analisando disco..."
+DISK_DATA=$(sudo du -sh /* 2>/dev/null)
+
+echo "📤 Enviando dados..."
+curl -X POST "$API_URL" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"diskData\\": \\"$DISK_DATA\\"}"
+
+echo ""
+echo "✅ Análise enviada! Verifique o app."`}
+                </pre>
+              </details>
             </div>
+          </div>
+          
+          <div className="flex items-center gap-2 mt-4 pt-4 border-t border-border">
+            <Button
+              onClick={loadLatestAnalysis}
+              disabled={isLoading}
+              variant="outline"
+              size="sm"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+              Atualizar
+            </Button>
+            {folders.length > 0 && (
+              <span className="text-sm text-muted-foreground">
+                {folders.length} pastas carregadas
+              </span>
+            )}
           </div>
         </Card>
 
-        {/* Input Card */}
+        {/* Manual Input Card */}
         <Card className="p-6 bg-card border-border">
+          <div className="flex items-start gap-4 mb-4">
+            <FolderOpen className="w-6 h-6 text-accent mt-1 flex-shrink-0" />
+            <div>
+              <h3 className="font-semibold text-foreground">Método Manual:</h3>
+              <p className="text-sm text-muted-foreground">
+                Cole os dados do comando manualmente
+              </p>
+            </div>
+          </div>
+
           <div className="space-y-4">
             <label className="text-sm font-medium text-foreground">
               Cole os dados do comando du:
